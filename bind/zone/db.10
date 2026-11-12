@@ -1,0 +1,4 @@
+$TTL 30
+@   IN SOA ns1.acme.test. admin.acme.test. (
+          2026111201 60 30 600 30 )
+    IN NS  ns1.acme.test.

@@ -7,4 +7,6 @@ examples
 *.md
 .dockerignore
 Dockerfile
+Dockerfile.bind
 docker-compose.yml
+.env

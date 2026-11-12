@@ -1,15 +1,67 @@
+# DNS-01 挑战托管：本地权威 BIND + 单 API 进程 + 独立 worker 进程
+# API 与 worker 共享同一 SQLite（命名卷 dnsdata），worker 独占 DNS 写入。
 services:
-  sandbox-checker:
+  bind:
+    build:
+      context: .
+      dockerfile: Dockerfile.bind
+    image: dns01-local-bind:1.0.0
+    container_name: dns01-bind
+    environment:
+      # 与 api/worker 的 TSIG_SECRET 必须一致
+      BIND_TSIG_SECRET: ${TSIG_SECRET}
+    ports:
+      # 仅映射到回环，便于宿主机用 dig 核对；不需要可删除
+      - "127.0.0.1:5353:53/udp"
+      - "127.0.0.1:5353:53/tcp"
+    networks:
+      dns01net:
+        ipv4_address: 10.20.0.2
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+      - SETUID
+      - SETGID
+    healthcheck:
+      test: ["CMD", "dig", "+time=3", "+tries=1", "@127.0.0.1", "acme.test", "SOA"]
+      interval: 10s
+      timeout: 4s
+      retries: 6
+      start_period: 8s
+
+  api:
     build:
       context: .
       dockerfile: Dockerfile
-    image: systemd-sandbox-checker:1.0.0
-    container_name: systemd-sandbox-checker
+    image: dns01-manager:1.0.0
+    container_name: dns01-api
+    depends_on:
+      bind:
+        condition: service_healthy
+    environment:
+      MANAGEMENT_KEY: ${MANAGEMENT_KEY}
+      DATABASE_PATH: /data/challenges.db
+      ALLOWED_DOMAINS: ${ALLOWED_DOMAINS:-acme.test,*.acme.test}
+      DNS_SERVER: bind
+      DNS_PORT: "53"
+      TSIG_KEY_NAME: ${TSIG_KEY_NAME:-acme-key.}
+      TSIG_SECRET: ${TSIG_SECRET}
+      TSIG_ALGORITHM: ${TSIG_ALGORITHM:-hmac-sha256}
+      # 故障开关默认关闭；可在 /docs 经 /api/v1/admin/faults 运行期切换
+      FAULT_LOST_RECEIPT: "0"
+      FAULT_DELAY_SECONDS: "0"
+      LOG_LEVEL: INFO
     ports:
-      # 宿主机 8080 -> 容器 8080；如端口冲突可修改左侧
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - dnsdata:/data
+    networks:
+      - dns01net
     restart: unless-stopped
-    # 纯计算服务：只读根文件系统、无特权、不挂主机目录
     read_only: true
     security_opt:
       - no-new-privileges:true
@@ -19,7 +71,51 @@ services:
       - /tmp:size=16m
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3).status==200 else 1)"]
-      interval: 30s
+      interval: 15s
       timeout: 5s
-      retries: 3
-      start_period: 5s
+      retries: 4
+      start_period: 6s
+
+  worker:
+    image: dns01-manager:1.0.0
+    container_name: dns01-worker
+    depends_on:
+      bind:
+        condition: service_healthy
+      api:
+        condition: service_started
+    command: ["python", "-m", "app.cli"]
+    environment:
+      MANAGEMENT_KEY: ${MANAGEMENT_KEY}
+      DATABASE_PATH: /data/challenges.db
+      ALLOWED_DOMAINS: ${ALLOWED_DOMAINS:-acme.test,*.acme.test}
+      DNS_SERVER: bind
+      DNS_PORT: "53"
+      TSIG_KEY_NAME: ${TSIG_KEY_NAME:-acme-key.}
+      TSIG_SECRET: ${TSIG_SECRET}
+      TSIG_ALGORITHM: ${TSIG_ALGORITHM:-hmac-sha256}
+      FAULT_LOST_RECEIPT: "0"
+      FAULT_DELAY_SECONDS: "0"
+      LOG_LEVEL: INFO
+    volumes:
+      - dnsdata:/data
+    networks:
+      - dns01net
+    restart: unless-stopped
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:size=16m
+
+networks:
+  dns01net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.20.0.0/24
+
+volumes:
+  dnsdata:

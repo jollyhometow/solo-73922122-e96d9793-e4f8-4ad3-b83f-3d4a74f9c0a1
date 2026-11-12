@@ -1,0 +1,21 @@
+# 本地权威 BIND9：演示用固定权威 DNS，接受 TSIG 动态更新
+FROM debian:bookworm-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends bind9 bind9utils dnsutils \
+    && rm -rf /var/lib/apt/lists/*
+
+# 区域文件与 named 配置
+COPY bind/named.conf /etc/bind/named.conf.local
+COPY bind/zone /var/lib/bind/zones
+COPY bind/entrypoint.sh /usr/local/bin/bind-entrypoint.sh
+RUN chmod +x /usr/local/bin/bind-entrypoint.sh \
+    && mkdir -p /var/lib/bind/zones /var/cache/bind /var/run/named \
+    && chown -R bind:bind /var/lib/bind /var/cache/bind /var/run/named /etc/bind
+
+EXPOSE 53/udp 53/tcp
+
+HEALTHCHECK --interval=10s --timeout=4s --start-period=8s --retries=6 \
+    CMD dig +time=3 +tries=1 @127.0.0.1 acme.test SOA >/dev/null 2>&1 || exit 1
+
+ENTRYPOINT ["/usr/local/bin/bind-entrypoint.sh"]
